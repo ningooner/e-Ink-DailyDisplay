@@ -21,6 +21,8 @@
 # After each update, _prev_1gray is updated with the new frame.
 # EPD_3IN7_1Gray_init() is only called once per mode transition (not per tick).
 
+import time
+
 import api_client
 from epd_3in7 import EPD_3in7  # MicroPython adds /lib/ to sys.path automatically
 
@@ -67,13 +69,16 @@ def show(api_base):
     """
     global _partial_mode, _prev_1gray
     api_client.get_frame_into(api_base, _epd.buffer_4Gray)
-    _epd.EPD_3IN7_4Gray_Clear()               # pre-clear: drives all pixels to white
+    if not _partial_mode:
+        # Only needed after a prior 4-gray (screen may have grey pixels from last cycle).
+        # After DU/partial mode the screen is already pure B&W — skip to save ~3s.
+        _epd.EPD_3IN7_4Gray_Clear()
     _epd.EPD_3IN7_4Gray_Display(_epd.buffer_4Gray)
     _partial_mode = False
     _prev_1gray = None
 
 
-def show_partial(api_base):
+def show_partial(api_base, delay_s=15):
     """
     Fetch a 1-gray frame and display via partial refresh (DU waveform, ~0.6s, no flash).
 
@@ -83,6 +88,10 @@ def show_partial(api_base):
     Subsequent calls skip the init (~300ms saved) and use the previous frame as the
     exact DU baseline, so only genuinely changed pixels get driven.
 
+    delay_s: seconds to wait after fetching the frame before writing to the display.
+    The server pre-renders the next minute's time 20s early; this delay ensures the
+    frame hits the screen right at the actual minute boundary rather than too early.
+
     If the server returns 204 (Spotify is playing), this call is a no-op.
     """
     global _partial_mode, _prev_1gray
@@ -90,6 +99,9 @@ def show_partial(api_base):
     got_frame = api_client.get_partial_frame_into(api_base, _epd.buffer_1Gray)
     if not got_frame:
         return
+
+    if delay_s > 0:
+        time.sleep(delay_s)
 
     if not _partial_mode:
         # First partial refresh after boot or after a full 4-gray display.
