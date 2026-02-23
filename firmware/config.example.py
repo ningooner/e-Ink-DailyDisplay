@@ -9,7 +9,7 @@ WIFI_PASSWORD = "YourPassword"
 API_BASE = "http://192.168.1.220:8765"
 
 # How often (seconds) to poll /status for changes
-POLL_INTERVAL_S = 5
+POLL_INTERVAL_S = 2
 
 # Force a full display refresh every N seconds to clear greyscale ghosting
 FORCE_FULL_INTERVAL_S = 3600  # 60 minutes
