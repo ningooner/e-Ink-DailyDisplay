@@ -25,6 +25,14 @@ async def _build_status() -> dict:
         fetch_weather(),
         get_now_playing(),
     )
+
+    # Fire background pre-fetch so art is ready (or nearly ready) when /frame arrives.
+    sp = spotify_data
+    if sp.get("is_playing") and sp.get("track_id"):
+        cdn_url = get_stored_art_url(sp["track_id"])
+        if cdn_url:  # only in real mode (MOCK has no CDN URL)
+            asyncio.create_task(get_art_bmp(sp["track_id"], cdn_url))
+
     return {
         "time":    display_now.strftime("%H:%M"),
         "seconds": now.second,
