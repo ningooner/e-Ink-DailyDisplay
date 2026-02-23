@@ -1,0 +1,8 @@
+services:
+  pico-api:
+    build: ./backend
+    container_name: pico-api
+    ports:
+      - "8765:8000"   # host:container — 8765 avoids conflicts with your other services
+    env_file: .env
+    restart: unless-stopped

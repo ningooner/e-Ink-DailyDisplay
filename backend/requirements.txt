@@ -1,0 +1,6 @@
+fastapi==0.115.8
+uvicorn[standard]==0.34.0
+httpx==0.28.1
+Pillow==11.1.0
+numpy==2.2.3
+python-dotenv==1.0.1
