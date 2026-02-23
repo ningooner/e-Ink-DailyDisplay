@@ -40,6 +40,21 @@ def show(api_base):
     _epd.EPD_3IN7_4Gray_Display(_epd.buffer_4Gray)
 
 
+def show_partial(api_base):
+    """
+    Fetch a 1-gray frame and display via partial refresh (~0.3s, no white flash).
+
+    Used for idle-mode clock-tick updates. Calls EPD_3IN7_1Gray_init() to switch
+    the panel into 1-gray mode before sending data (~300ms LUT load included).
+    If the server returns 204 (Spotify is playing), this call is a no-op.
+    """
+    got_frame = api_client.get_partial_frame_into(api_base, _epd.buffer_1Gray)
+    if not got_frame:
+        return
+    _epd.EPD_3IN7_1Gray_init()
+    _epd.EPD_3IN7_1Gray_Display_Part(_epd.buffer_1Gray)
+
+
 def sleep():
     """Put the EPD into deep sleep to save power."""
     _epd.Sleep()

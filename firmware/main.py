@@ -127,8 +127,16 @@ def main():
                   "force" if force_full else "minute")
         print("Refreshing display ({})".format(reason))
 
-        if not safe_show():
-            continue
+        if minute_ticked and not mode_changed and not track_changed and not force_full:
+            # Clock tick only: use partial refresh (~0.6s total, no white flash)
+            try:
+                display.show_partial(config.API_BASE)
+            except Exception as e:
+                print("show_partial error:", e)
+                continue
+        else:
+            if not safe_show():
+                continue
 
         if mode_changed or track_changed or force_full:
             last_full_s = time.time()
