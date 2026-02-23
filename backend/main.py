@@ -15,13 +15,20 @@ app = FastAPI(title="PaperDeck API")
 async def _build_status() -> dict:
     zurich_tz = datetime.timezone(datetime.timedelta(hours=1))
     now = datetime.datetime.now(tz=zurich_tz)
+
+    # Pre-advance the displayed time during the last 20s of each minute.
+    # The Pico detects the "tick" early, fetches the frame (~2s), and the
+    # display shows the correct time right as the real minute changes.
+    display_now = now + datetime.timedelta(minutes=1) if now.second >= 40 else now
+
     weather_data, spotify_data = await asyncio.gather(
         fetch_weather(),
         get_now_playing(),
     )
     return {
-        "time":    now.strftime("%H:%M"),
-        "date":    now.strftime("%a %d %b"),
+        "time":    display_now.strftime("%H:%M"),
+        "seconds": now.second,
+        "date":    display_now.strftime("%a %d %b"),
         "weather": weather_data,
         "spotify": spotify_data,
     }

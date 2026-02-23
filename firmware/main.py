@@ -73,6 +73,20 @@ def safe_show():
         return False
 
 
+def _smart_sleep(status):
+    """
+    Sleep until ~1s before the next minute boundary, capped at POLL_INTERVAL_S.
+
+    Uses the server's 'seconds' field from the last /status response to schedule
+    the next poll so the Pico wakes up just before each minute tick rather than
+    sleeping a fixed interval. This keeps the displayed clock within ~2-3s of
+    real time regardless of boot timing.
+    """
+    secs = status.get("seconds", 30) if status else config.POLL_INTERVAL_S
+    sleep_s = max(1, min(60 - secs - 1, config.POLL_INTERVAL_S))
+    time.sleep(sleep_s)
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -96,16 +110,15 @@ def main():
     last_minute     = status.get("time", "")
     last_full_s     = time.time()
 
-    print("Boot complete. Polling every", config.POLL_INTERVAL_S, "s")
+    print("Boot complete. Polling every", config.POLL_INTERVAL_S, "s max")
 
-    # Loop
+    # Loop — sleep is now dynamic (see _smart_sleep) rather than a fixed interval
     while True:
-        time.sleep(config.POLL_INTERVAL_S)
-
         ensure_wifi(wlan)
 
         status = safe_get_status()
         if status is None:
+            time.sleep(config.POLL_INTERVAL_S)
             continue
 
         sp          = status.get("spotify", {})
@@ -119,6 +132,7 @@ def main():
         force_full    = (time.time() - last_full_s) >= config.FORCE_FULL_INTERVAL_S
 
         if not (mode_changed or track_changed or minute_ticked or force_full):
+            _smart_sleep(status)
             continue
 
         # Something changed — fetch and show the new frame
@@ -133,9 +147,11 @@ def main():
                 display.show_partial(config.API_BASE)
             except Exception as e:
                 print("show_partial error:", e)
+                _smart_sleep(status)
                 continue
         else:
             if not safe_show():
+                _smart_sleep(status)
                 continue
 
         if mode_changed or track_changed or force_full:
@@ -144,6 +160,7 @@ def main():
         last_is_playing = is_playing
         last_track_id   = track_id
         last_minute     = minute
+        _smart_sleep(status)
 
 
 main()
