@@ -27,8 +27,9 @@ import api_client
 from epd_3in7 import EPD_3in7  # MicroPython adds /lib/ to sys.path automatically
 
 _epd = None
-_partial_mode = False  # True once 1-gray init has been run; reset by show()
-_prev_1gray = None     # Baseline buffer for DU waveform (current screen state)
+_partial_mode = False     # True once 1-gray init has been run; reset by show()
+_prev_1gray = None        # Baseline buffer for DU waveform (current screen state)
+_screen_has_grey = False  # True after a 4-gray image is on screen; False after any Clear
 
 
 def init():
@@ -63,17 +64,23 @@ def show(api_base):
     Fetch a frame from the server and display it (full 4-gray refresh, ~6 seconds total).
 
     Streams /frame directly into buffer_4Gray — no second 33 KB allocation.
-    Pre-clears to all-white before displaying so the 4-gray waveform always starts
-    from a known clean state — eliminates ghosting from the previous image.
+    Pre-clears to all-white only when grey pixels are present AND we're transitioning
+    from idle/1-bit mode (i.e., the 1Gray_Clear() path was not taken on entry).
+    This prevents the 3.5s clear from firing on consecutive music track changes while
+    still protecting against grey residuals after unusual state transitions.
     Resets partial-refresh state so the next show_partial() re-initialises 1-gray mode.
     """
-    global _partial_mode, _prev_1gray
+    global _partial_mode, _prev_1gray, _screen_has_grey
     api_client.get_frame_into(api_base, _epd.buffer_4Gray)
-    if not _partial_mode:
-        # Only needed after a prior 4-gray (screen may have grey pixels from last cycle).
-        # After DU/partial mode the screen is already pure B&W — skip to save ~3s.
+    if _screen_has_grey and _partial_mode:
+        # Grey pixels on screen AND coming from partial/idle mode — clear first.
+        # In normal operation this condition is unreachable because _partial_mode is
+        # only True after EPD_3IN7_1Gray_Clear() which sets _screen_has_grey=False.
+        # Consecutive track changes: _partial_mode=False → skip → saves ~3.5s.
         _epd.EPD_3IN7_4Gray_Clear()
+        _screen_has_grey = False
     _epd.EPD_3IN7_4Gray_Display(_epd.buffer_4Gray)
+    _screen_has_grey = True  # 4-gray image has grey pixels on screen
     _partial_mode = False
     _prev_1gray = None
 
@@ -94,7 +101,7 @@ def show_partial(api_base, delay_s=15):
 
     If the server returns 204 (Spotify is playing), this call is a no-op.
     """
-    global _partial_mode, _prev_1gray
+    global _partial_mode, _prev_1gray, _screen_has_grey
 
     got_frame = api_client.get_partial_frame_into(api_base, _epd.buffer_1Gray)
     if not got_frame:
@@ -114,6 +121,7 @@ def show_partial(api_base, delay_s=15):
         # white, so the all-white seed is actually accurate.
         _epd.EPD_3IN7_1Gray_init()
         _epd.EPD_3IN7_1Gray_Clear()            # drives grey pixels to white (full waveform)
+        _screen_has_grey = False               # screen is now pure B&W
         _partial_mode = True
         _prev_1gray = bytearray(b'\xff' * 16800)  # screen is now truly all-white
 

@@ -105,10 +105,12 @@ class EPD_3in7:
         self.width = EPD_WIDTH
         self.height = EPD_HEIGHT
         
-        self.lut_4Gray_GC = EPD_3IN7_lut_4Gray_GC
-        self.lut_1Gray_GC = EPD_3IN7_lut_1Gray_GC
-        self.lut_1Gray_DU = EPD_3IN7_lut_1Gray_DU
-        self.lut_1Gray_A2 = EPD_3IN7_lut_1Gray_A2
+        # Pre-convert LUT lists to bytearrays: 1 byte/element vs ~4-8 bytes/element
+        # for a Python list, and spi.write() accepts bytearrays directly.
+        self.lut_4Gray_GC = bytearray(EPD_3IN7_lut_4Gray_GC)
+        self.lut_1Gray_GC = bytearray(EPD_3IN7_lut_1Gray_GC)
+        self.lut_1Gray_DU = bytearray(EPD_3IN7_lut_1Gray_DU)
+        self.lut_1Gray_A2 = bytearray(EPD_3IN7_lut_1Gray_A2)
         
         self.black = 0x00
         self.white = 0xff
@@ -173,19 +175,24 @@ class EPD_3in7:
         self.delay_ms(200) 
         print("e-Paper busy release")
         
-    def Load_LUT(self,lut):
+    def Load_LUT(self, lut):
         self.send_command(0x32)
-        for count in range(0, 105):
-            if lut == 0 :
-                self.send_data(self.lut_4Gray_GC[count])
-            elif lut == 1 :
-                self.send_data(self.lut_1Gray_GC[count])
-            elif lut == 2 :
-                self.send_data(self.lut_1Gray_DU[count])
-            elif lut == 3 :
-                self.send_data(self.lut_1Gray_A2[count])
-            else:
-                print("There is no such lut ")
+        if lut == 0:
+            lut_data = self.lut_4Gray_GC
+        elif lut == 1:
+            lut_data = self.lut_1Gray_GC
+        elif lut == 2:
+            lut_data = self.lut_1Gray_DU
+        elif lut == 3:
+            lut_data = self.lut_1Gray_A2
+        else:
+            print("There is no such lut ")
+            return
+        # Single bulk SPI transfer: replaces 105 individual send_data() calls.
+        self.digital_write(self.dc_pin, 1)
+        self.digital_write(self.cs_pin, 0)
+        self.spi.write(lut_data)
+        self.digital_write(self.cs_pin, 1)
         
     def EPD_3IN7_4Gray_init(self):
     
@@ -531,14 +538,7 @@ class EPD_3in7:
         self.send_command(0x20)
         self.ReadBusy()
         
-    def EPD_3IN7_1Gray_Display_Part(self,Image):
-        
-        high = self.height
-        if( self.width % 8 == 0) :
-            wide =  self.width // 8
-        else :
-            wide =  self.width // 8 + 1
-
+    def EPD_3IN7_1Gray_Display_Part(self, Image):
         self.send_command(0x44)
         self.send_data(0x00)
         self.send_data(0x00)
@@ -557,11 +557,16 @@ class EPD_3in7:
         self.send_command(0x4F)   # SET_RAM_Y_ADDRESS_COUNTER
         self.send_data(0x00)
         self.send_data(0x00)
-        
+
         self.send_command(0x24)
-        for j in range(0, high):
-            for i in range(0, wide):
-                self.send_data(Image[i + j * wide])
+        # Single bulk SPI transfer of all 16,800 bytes — replaces the nested
+        # for j/for i loop (480 × 35 = 16,800 individual send_data() calls).
+        # Image is buffer_1Gray, a bytearray laid out contiguously in memory,
+        # so iterating i + j*wide is equivalent to a sequential read from [0].
+        self.digital_write(self.dc_pin, 1)
+        self.digital_write(self.cs_pin, 0)
+        self.spi.write(Image)
+        self.digital_write(self.cs_pin, 1)
 
         self.Load_LUT(2)
         self.send_command(0x20)
