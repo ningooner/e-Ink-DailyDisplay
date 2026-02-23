@@ -30,5 +30,8 @@ rendered eink pics/
 CLAUDE.md
 **/CLAUDE.md
 
+# Firmware credentials (copy from config.example.py and edit)
+firmware/config.py
+
 # Docker
 *.log

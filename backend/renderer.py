@@ -299,7 +299,8 @@ def img_to_4gray_buffer(img: Image.Image) -> bytes:
     NOTE: verify this matches epd_3in7.py's Display_4Gray convention before
     first hardware test — the mapping may need to be inverted.
     """
-    arr = np.array(img.convert("L"), dtype=np.uint8)  # (280, 480)
+    img = img.rotate(-90, expand=True)                 # 480×280 landscape → 280×480 portrait scan order
+    arr = np.array(img.convert("L"), dtype=np.uint8)  # (480, 280)
     lv  = (arr // 85).astype(np.uint8)                # {0, 85, 170, 255} → {0, 1, 2, 3}
     flat = lv.flatten()                                # 134,400 elements
     packed = (

@@ -192,8 +192,8 @@ services:
 SPOTIFY_CLIENT_ID=your_client_id
 SPOTIFY_CLIENT_SECRET=your_client_secret
 SPOTIFY_REFRESH_TOKEN=your_refresh_token
-HOME_LAT=51.5074
-HOME_LON=-0.1278
+HOME_LAT=your_home_lat
+HOME_LON=your_home_lon
 WEATHER_CACHE_TTL=900
 ```
 
