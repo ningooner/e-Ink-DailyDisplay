@@ -286,3 +286,26 @@ def build_now_playing_frame(status, art_bytes):
 
 def build_idle_frame(status):
     return render_to_bmp(render_idle(status))
+
+# ── PICO WIRE FORMAT ─────────────────────────────────────────────────────────
+def img_to_4gray_buffer(img: Image.Image) -> bytes:
+    """
+    Convert a 480×280 4-level greyscale image to a packed 2bpp byte buffer
+    for the Waveshare Pico-ePaper-3.7 EPD driver.
+
+    Output: 33,600 bytes (4 pixels per byte, MSB first, rows top-to-bottom).
+    Grey level mapping: 0→0 (black), 85→1 (dark grey), 170→2 (light grey), 255→3 (white).
+
+    NOTE: verify this matches epd_3in7.py's Display_4Gray convention before
+    first hardware test — the mapping may need to be inverted.
+    """
+    arr = np.array(img.convert("L"), dtype=np.uint8)  # (280, 480)
+    lv  = (arr // 85).astype(np.uint8)                # {0, 85, 170, 255} → {0, 1, 2, 3}
+    flat = lv.flatten()                                # 134,400 elements
+    packed = (
+        (flat[0::4] << 6) |
+        (flat[1::4] << 4) |
+        (flat[2::4] << 2) |
+         flat[3::4]
+    )
+    return bytes(packed.astype(np.uint8))
