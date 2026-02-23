@@ -54,6 +54,9 @@ def get_partial_frame_into(api_base, buf):
     if r.status_code == 204:
         r.close()
         return False
+    if r.status_code != 200:
+        r.close()
+        raise OSError("/frame_partial returned HTTP {}".format(r.status_code))
     mv = memoryview(buf)
     total = 0
     while total < len(mv):

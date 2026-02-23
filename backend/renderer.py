@@ -293,20 +293,32 @@ def img_to_4gray_buffer(img: Image.Image) -> bytes:
     Convert a 480×280 4-level greyscale image to a packed 2bpp byte buffer
     for the Waveshare Pico-ePaper-3.7 EPD driver.
 
-    Output: 33,600 bytes (4 pixels per byte, MSB first, rows top-to-bottom).
+    Output: 33,600 bytes (4 pixels per byte, LSB first, rows top-to-bottom).
     Grey level mapping: 0→0 (black), 85→1 (dark grey), 170→2 (light grey), 255→3 (white).
 
-    NOTE: verify this matches epd_3in7.py's Display_4Gray convention before
-    first hardware test — the mapping may need to be inverted.
+    Packing order: LSB-first to match EPD_3IN7_4Gray_Display's read loop, which
+    extracts bits [1:0] first (pixel 0), then [3:2], [5:4], [7:6].
     """
     img = img.rotate(-90, expand=True)                 # 480×280 landscape → 280×480 portrait scan order
     arr = np.array(img.convert("L"), dtype=np.uint8)  # (480, 280)
     lv  = (arr // 85).astype(np.uint8)                # {0, 85, 170, 255} → {0, 1, 2, 3}
     flat = lv.flatten()                                # 134,400 elements
     packed = (
-        (flat[0::4] << 6) |
-        (flat[1::4] << 4) |
-        (flat[2::4] << 2) |
-         flat[3::4]
+         flat[0::4]           |   # pixel 0 → bits [1:0]  (driver reads first)
+        (flat[1::4] << 2)     |   # pixel 1 → bits [3:2]
+        (flat[2::4] << 4)     |   # pixel 2 → bits [5:4]
+        (flat[3::4] << 6)         # pixel 3 → bits [7:6]
     )
     return bytes(packed.astype(np.uint8))
+
+
+def img_to_1gray_buffer(img: Image.Image) -> bytes:
+    """
+    Convert a 480×280 greyscale image to a packed 1bpp byte buffer for
+    EPD_3IN7_1Gray_Display_Part (partial refresh, ~0.3s, no white flash).
+
+    Output: 16,800 bytes (MONO_HLSB: 8px/byte MSB-first, 280px-wide portrait rows).
+    Threshold: pixels < 128 → black, >= 128 → white.
+    """
+    img = img.rotate(-90, expand=True)   # 480×280 landscape → 280×480 portrait
+    return img.convert("1").tobytes()    # PIL "1" mode = MONO_HLSB, 16,800 bytes

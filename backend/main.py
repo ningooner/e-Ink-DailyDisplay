@@ -7,7 +7,7 @@ from fastapi.responses import Response
 from weather import fetch_weather
 from spotify import get_now_playing, get_stored_art_url, MOCK_MODE
 from image_pipeline import get_art_bmp
-from renderer import render_idle, render_now_playing, img_to_4gray_buffer
+from renderer import render_idle, render_now_playing, img_to_4gray_buffer, img_to_1gray_buffer
 
 app = FastAPI(title="PaperDeck API")
 
@@ -89,7 +89,25 @@ async def frame():
     return Response(
         content=img_to_4gray_buffer(img),
         media_type="application/octet-stream",
-        headers={"Cache-Control": "no-store"},
+        headers={"Cache-Control": "no-store", "Content-Length": "33600"},
+    )
+
+
+@app.get("/frame_partial")
+async def frame_partial():
+    """
+    Returns a packed 1bpp binary frame (16,800 bytes) for EPD_3IN7_1Gray_Display_Part.
+    Used for idle-mode clock-tick updates (~0.3s partial refresh, no white flash).
+    Returns HTTP 204 if Spotify is currently playing — caller should skip the update.
+    """
+    status = await _build_status()
+    if status["spotify"]["is_playing"]:
+        return Response(status_code=204)
+    img = render_idle(status)
+    return Response(
+        content=img_to_1gray_buffer(img),
+        media_type="application/octet-stream",
+        headers={"Cache-Control": "no-store", "Content-Length": "16800"},
     )
 
 
