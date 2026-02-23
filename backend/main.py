@@ -1,40 +1,50 @@
 import datetime
 import asyncio
-import time
+import json
 import httpx
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 
 from weather import fetch_weather
 from spotify import get_now_playing, get_stored_art_url, MOCK_MODE
 from image_pipeline import get_art_bmp
 from renderer import render_idle, render_now_playing, img_to_4gray_buffer, img_to_1gray_buffer
 
-app = FastAPI(title="PaperDeck API")
 
-# ── Opt 2: Short-lived Spotify state cache ─────────────────────────────────────
-# /status and /frame both call _build_status() within ~1-2s of each other.
-# Caching the Spotify API response avoids a second live request on /frame.
-_spotify_cache: dict = {}
-_spotify_cache_ts: float = 0.0
-_SPOTIFY_CACHE_TTL = 5.0  # seconds
-
-
-async def _get_cached_spotify() -> dict:
-    global _spotify_cache, _spotify_cache_ts
-    if time.monotonic() - _spotify_cache_ts < _SPOTIFY_CACHE_TTL:
-        return _spotify_cache
-    data = await get_now_playing()
-    _spotify_cache = data
-    _spotify_cache_ts = time.monotonic()
-    return data
+# ── Persistent Spotify state (owned by background poller) ─────────────────
+# Replaced the old TTL cache (_spotify_cache / _get_cached_spotify).
+# The poller keeps this up-to-date at 1.5 s cadence; /status reads it
+# directly with zero API overhead.
+_spotify_state: dict = {
+    "is_playing": False,
+    "track":      None,
+    "artist":     None,
+    "album":      None,
+    "track_id":   None,
+    "art_url":    None,
+}
 
 
-# ── Opt 3: Pre-rendered 4-gray frame cache ────────────────────────────────────
-# When /status detects a new track_id, rendering is kicked off in a background
-# asyncio task. By the time the Pico requests /frame (~1-2s later), the 33,600-
-# byte buffer is ready to serve directly — eliminating render latency from the
-# critical path.
+# ── SSE subscriber registry ────────────────────────────────────────────────
+# Each connected /events client gets one asyncio.Queue (maxsize=32).
+# The poller calls _broadcast_sse(); the StreamingResponse generator drains it.
+_sse_subscribers: set[asyncio.Queue] = set()
+
+
+def _broadcast_sse(event: dict) -> None:
+    """Push a JSON event into every active SSE subscriber queue."""
+    payload = json.dumps(event)
+    dead: set[asyncio.Queue] = set()
+    for q in _sse_subscribers:
+        try:
+            q.put_nowait(payload)
+        except asyncio.QueueFull:
+            dead.add(q)
+    _sse_subscribers -= dead
+
+
+# ── Pre-rendered 4-gray frame cache ────────────────────────────────────────
 _frame_cache: dict[str, bytes] = {}  # track_id → 33,600 packed 2bpp bytes
 
 
@@ -49,48 +59,147 @@ async def _prerender_frame(track_id: str, status: dict, art_url: str | None) -> 
         print(f"[prerender] failed for {track_id}: {exc}")
 
 
+# ── Background Spotify polling loop ────────────────────────────────────────
+_SPOTIFY_POLL_INTERVAL = 1.5  # seconds
+
+
+async def _spotify_poll_loop() -> None:
+    """
+    Runs from app startup to shutdown. Polls Spotify every 1.5 s, maintains
+    _spotify_state, triggers pre-rendering on track change, and broadcasts SSE
+    events whenever play-state or track changes.
+    """
+    global _spotify_state
+    print("[poller] started")
+    while True:
+        try:
+            new_state = await get_now_playing()
+            old_state = _spotify_state
+
+            track_changed      = new_state.get("track_id") != old_state.get("track_id")
+            playstate_changed  = new_state.get("is_playing") != old_state.get("is_playing")
+
+            _spotify_state = new_state  # always advance the cache
+
+            if track_changed or playstate_changed:
+                print(
+                    f"[poller] state change → "
+                    f"track_id={new_state.get('track_id')!r} "
+                    f"is_playing={new_state.get('is_playing')}"
+                )
+                _broadcast_sse({
+                    "event_type": "spotify_update",
+                    "is_playing": new_state.get("is_playing"),
+                    "track_id":   new_state.get("track_id"),
+                    "track":      new_state.get("track"),
+                    "artist":     new_state.get("artist"),
+                    "album":      new_state.get("album"),
+                    "art_url":    new_state.get("art_url"),
+                })
+
+                # Pre-render the now-playing frame when a new track starts.
+                # render_now_playing only needs status["spotify"] and status["time"],
+                # so we build a lightweight dict rather than a full _build_status() call.
+                if track_changed and new_state.get("is_playing") and new_state.get("track_id"):
+                    tid = new_state["track_id"]
+                    if tid not in _frame_cache:
+                        zurich_tz  = datetime.timezone(datetime.timedelta(hours=1))
+                        now        = datetime.datetime.now(tz=zurich_tz)
+                        display_now = now + datetime.timedelta(minutes=1) if now.second >= 40 else now
+                        minimal_status = {
+                            "time":    display_now.strftime("%H:%M"),
+                            "spotify": new_state,
+                        }
+                        cdn_url = None if MOCK_MODE else get_stored_art_url(tid)
+                        asyncio.create_task(_prerender_frame(tid, minimal_status, cdn_url))
+
+        except Exception as exc:
+            print(f"[poller] error: {exc}")
+
+        await asyncio.sleep(_SPOTIFY_POLL_INTERVAL)
+
+
+# ── App lifespan ────────────────────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(_spotify_poll_loop())
+    yield
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+app = FastAPI(title="PaperDeck API", lifespan=lifespan)
+
+
+# ── Status builder ──────────────────────────────────────────────────────────
 async def _build_status() -> dict:
     zurich_tz = datetime.timezone(datetime.timedelta(hours=1))
     now = datetime.datetime.now(tz=zurich_tz)
-
-    # Pre-advance the displayed time during the last 20s of each minute.
-    # The Pico detects the "tick" early, fetches the frame (~2s), and the
-    # display shows the correct time right as the real minute changes.
     display_now = now + datetime.timedelta(minutes=1) if now.second >= 40 else now
 
-    # Opt 2: use cached Spotify state if < 5s old (avoids double API call on
-    # the /status → /frame sequence that the Pico issues in quick succession).
-    weather_data, spotify_data = await asyncio.gather(
-        fetch_weather(),
-        _get_cached_spotify(),
-    )
+    # Weather still fetched here; it has its own cache inside fetch_weather().
+    # Spotify comes straight from _spotify_state — no live API call needed.
+    weather_data = await fetch_weather()
 
-    status_dict = {
+    return {
         "time":    display_now.strftime("%H:%M"),
         "seconds": now.second,
         "date":    display_now.strftime("%a %d %b"),
         "weather": weather_data,
-        "spotify": spotify_data,
+        "spotify": _spotify_state,
     }
 
-    # Opt 3: when a new track is detected, kick off background rendering so the
-    # frame is ready before the Pico requests /frame.
-    sp = spotify_data
-    if sp.get("is_playing") and sp.get("track_id"):
-        tid = sp["track_id"]
-        cdn_url = None if MOCK_MODE else get_stored_art_url(tid)
-        if tid not in _frame_cache:
-            # Pre-render the full 4-gray frame in the background.
-            # _prerender_frame internally calls get_art_bmp which also warms the
-            # art cache — no separate art-only pre-fetch task needed.
-            asyncio.create_task(_prerender_frame(tid, status_dict, cdn_url))
 
-    return status_dict
-
+# ── Endpoints ───────────────────────────────────────────────────────────────
 
 @app.get("/status")
 async def status():
     return await _build_status()
+
+
+@app.get("/events")
+async def events():
+    """
+    Server-Sent Events stream.  Subscribe here to receive push notifications
+    without polling.  The stream is designed to be extensible: route any future
+    server-originated notifications (weather alerts, system events, etc.) through
+    this same endpoint by adding new event_type values.
+
+    Event payload shape:
+        data: {"event_type": "spotify_update", "is_playing": bool,
+               "track_id": str|null, "track": str|null, ...}
+
+    The stream sends an initial {"event_type": "connected"} frame on connect,
+    then a ": keepalive" comment every 30 s to prevent proxy timeouts.
+    """
+    queue: asyncio.Queue = asyncio.Queue(maxsize=32)
+    _sse_subscribers.add(queue)
+
+    async def generator():
+        try:
+            # Immediate confirmation so the client knows the stream is live.
+            yield 'data: {"event_type": "connected"}\n\n'
+            while True:
+                try:
+                    payload = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    yield f"data: {payload}\n\n"
+                except asyncio.TimeoutError:
+                    # SSE comment — keeps the TCP connection alive through proxies.
+                    yield ": keepalive\n\n"
+        finally:
+            _sse_subscribers.discard(queue)
+
+    return StreamingResponse(
+        generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control":    "no-cache",
+            "X-Accel-Buffering": "no",   # disable nginx response buffering for SSE
+        },
+    )
 
 
 @app.get("/art/{track_id}")
@@ -98,16 +207,11 @@ async def album_art(track_id: str):
     """
     Returns a 280×280 4-level greyscale BMP ready for the Pico framebuffer.
     Requires /status to have been called at least once for this track_id
-    so the Spotify art URL is in the store. Returns 404 if not found yet.
+    so the Spotify art URL is in the store.  Returns 404 if not found yet.
     """
-    from spotify import MOCK_MODE
-
     art_url_spotify = None
 
-    if MOCK_MODE:
-        # No real URL — image_pipeline will generate a gradient
-        art_url_spotify = None
-    else:
+    if not MOCK_MODE:
         art_url_spotify = get_stored_art_url(track_id)
         if not art_url_spotify:
             raise HTTPException(
@@ -135,7 +239,7 @@ async def frame():
     to the Waveshare Pico-ePaper-3.7 framebuffer.
 
     Renders now-playing if Spotify is active, otherwise renders the idle screen.
-    Opt 3: serves a pre-rendered frame from _frame_cache on cache hit (instant),
+    Serves a pre-rendered frame from _frame_cache on cache hit (instant),
     falls back to live rendering if the background task hasn't finished yet.
     """
     status = await _build_status()
@@ -144,13 +248,12 @@ async def frame():
     if sp["is_playing"]:
         tid = sp["track_id"]
         if tid in _frame_cache:
-            # Pre-rendered frame ready — serve instantly, no render latency.
             return Response(
                 content=_frame_cache[tid],
                 media_type="application/octet-stream",
                 headers={"Cache-Control": "no-store", "Content-Length": "33600"},
             )
-        # Cache miss: background pre-render not done yet — render live as fallback.
+        # Cache miss: pre-render not done yet — render live as fallback.
         art_url = None if MOCK_MODE else get_stored_art_url(tid)
         art_bytes = await get_art_bmp(tid, art_url)
         img = render_now_playing(status, art_bytes)
@@ -168,7 +271,7 @@ async def frame():
 async def frame_partial():
     """
     Returns a packed 1bpp binary frame (16,800 bytes) for EPD_3IN7_1Gray_Display_Part.
-    Used for idle-mode clock-tick updates (~0.3s partial refresh, no white flash).
+    Used for idle-mode clock-tick updates (~0.3 s partial refresh, no white flash).
     Returns HTTP 204 if Spotify is currently playing — caller should skip the update.
     """
     status = await _build_status()
